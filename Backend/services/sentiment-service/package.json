@@ -1,0 +1,12 @@
+{
+  "name": "sentiment-service",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": ".\\.venv\\Scripts\\python.exe app.py",
+    "dev": ".\\.venv\\Scripts\\python.exe app.py",
+    "test": ".\\.venv\\Scripts\\python.exe -m unittest test_app.py"
+  },
+  "dependencies": { "cors": "^2.8.6", "dotenv": "^17.4.2", "express": "^5.2.1", "jsonwebtoken": "^9.0.3", "pg": "^8.23.0" },
+  "devDependencies": { "nodemon": "^3.1.14" }
+}
