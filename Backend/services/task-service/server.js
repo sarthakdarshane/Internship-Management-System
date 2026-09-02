@@ -287,6 +287,42 @@ router.patch(
   }),
 );
 
+router.put(
+  "/:taskId",
+  asyncHandler(async (req, res) => {
+    const taskId = toPositiveInteger(req.params.taskId);
+    if (!taskId) return res.status(400).json({ message: "taskId must be a positive integer" });
+
+    const existing = await pool.query("SELECT * FROM tasks WHERE task_id = $1", [taskId]);
+    const task = existing.rows[0];
+    if (!task) return res.status(404).json({ message: "Task not found" });
+    if (!taskAccess(task, req.user)) {
+      return res.status(403).json({ message: "You do not have access to this task" });
+    }
+
+    const managerCanEdit = isProgrammeManager(req.user.role) || Number(task.mentor_id) === Number(req.user.user_id);
+    const allowedFields = managerCanEdit
+      ? ["title", "description", "due_date", "status"]
+      : ["status"];
+    const updates = allowedFields.filter((field) => hasOwn(req.body, field));
+    if (!updates.length) return res.status(400).json({ message: "No allowed fields supplied" });
+
+    const validationError = validateTaskFields(req.body);
+    if (validationError) return res.status(400).json({ message: validationError });
+    if (hasOwn(req.body, "title") && typeof req.body.title === "string") {
+      req.body.title = req.body.title.trim();
+    }
+
+    const values = updates.map((field) => req.body[field]);
+    const setClause = updates.map((field, index) => field + " = $" + (index + 1)).join(", ");
+    const result = await pool.query(
+      "UPDATE tasks SET " + setClause + ", updated_at = CURRENT_TIMESTAMP WHERE task_id = $" + (values.length + 1) + " RETURNING *",
+      [...values, taskId],
+    );
+    res.json({ message: "Task updated successfully", task: result.rows[0] });
+  }),
+);
+
 router.delete(
   "/:taskId",
   authorize("MENTOR", "ADMIN", "HR"),
