@@ -26,7 +26,7 @@ const toPositiveInteger = (value) => {
 const isIsoDate = (value) =>
   value === null ||
   value === undefined ||
-  (typeof value === "string" && /^\\d{4}-\\d{2}-\\d{2}$/.test(value));
+  (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value));
 const taskAccess = (task, user) =>
   isProgrammeManager(user.role) ||
   Number(task.intern_id) === Number(user.user_id) ||
