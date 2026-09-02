@@ -167,11 +167,18 @@ def health():
 def analyze():
     payload = request.get_json(silent=True) or {}
     update_id = payload.get("update_id")
-    text = payload.get("text_content")
+    requested_intern_id = payload.get("intern_id")
+    text = payload.get("text_content", payload.get("text"))
     if type(update_id) is not int or update_id <= 0:
         return jsonify(message="update_id must be a positive integer"), 400
+    if requested_intern_id is not None and (
+        type(requested_intern_id) is not int or requested_intern_id <= 0
+    ):
+        return jsonify(message="intern_id must be a positive integer"), 400
+    if requested_intern_id is not None and requested_intern_id != g.user.get("user_id"):
+        return jsonify(message="You can only analyze your own update"), 403
     if not isinstance(text, str) or not text.strip():
-        return jsonify(message="text_content must be non-empty text"), 400
+        return jsonify(message="text or text_content must be non-empty text"), 400
     cleaned_text = text.strip()
     if len(cleaned_text) > MAX_TEXT_LENGTH:
         return jsonify(message="text_content must be 5000 characters or fewer"), 400
@@ -194,7 +201,13 @@ def analyze():
         )
         result = cursor.fetchone()
         connection.commit()
-    return jsonify(message="Sentiment analysed successfully", analysis=analysis_to_json(result)), 201
+    analysis = analysis_to_json(result)
+    return jsonify(
+        message="Sentiment analysed successfully",
+        sentiment=analysis["sentiment"],
+        score=analysis["score"],
+        analysis=analysis,
+    ), 201
 
 
 @app.route("/api/sentiment/mine", methods=["GET", "OPTIONS"])
