@@ -11,25 +11,62 @@ const {
 
 const app = express();
 const pool = createPool();
+const PORT = Number(process.env.PORT || 5003);
+const VALID_STATUSES = new Set(["PENDING", "IN_PROGRESS", "COMPLETED"]);
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const isProgrammeManager = (role) => ["ADMIN", "HR"].includes(role);
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+const toPositiveInteger = (value) => {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+};
+const isIsoDate = (value) =>
+  value === null ||
+  value === undefined ||
+  (typeof value === "string" && /^\\d{4}-\\d{2}-\\d{2}$/.test(value));
 const taskAccess = (task, user) =>
   isProgrammeManager(user.role) ||
-  task.intern_id === user.user_id ||
-  task.mentor_id === user.user_id;
+  Number(task.intern_id) === Number(user.user_id) ||
+  Number(task.mentor_id) === Number(user.user_id);
+
+function validateTaskFields(body, { creating = false } = {}) {
+  const required = ["internship_id", "intern_id", "mentor_id"];
+  if (creating && required.some((field) => !toPositiveInteger(body[field]))) {
+    return "internship_id, intern_id and mentor_id must be positive integers";
+  }
+  if (creating && (typeof body.title !== "string" || !body.title.trim())) {
+    return "title is required";
+  }
+  if (typeof body.title === "string" && (body.title.trim().length === 0 || body.title.trim().length > 180)) {
+    return "title must contain 1 to 180 characters";
+  }
+  if (body.description !== undefined && body.description !== null && typeof body.description !== "string") {
+    return "description must be a string or null";
+  }
+  if (typeof body.description === "string" && body.description.length > 10000) {
+    return "description must be 10000 characters or fewer";
+  }
+  if (!isIsoDate(body.due_date)) return "due_date must use YYYY-MM-DD format or be null";
+  if (body.status !== undefined && !VALID_STATUSES.has(body.status)) {
+    return "status must be PENDING, IN_PROGRESS or COMPLETED";
+  }
+  return null;
+}
 
 app.get("/", (req, res) =>
-  res.json({ message: "Task Service API is running" }),
+  res.json({ service: "task-service", message: "Task Service API is running" }),
 );
+
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
-    res.json({ status: "ok" });
+    res.json({ status: "ok", service: "task-service" });
   } catch (error) {
     console.error("Task health check failed:", error.message);
-    res.status(500).json({ message: "Database connection failed" });
+    res.status(503).json({ status: "error", message: "Database connection failed" });
   }
 });
 
@@ -40,38 +77,28 @@ router.post(
   "/",
   authorize("MENTOR", "ADMIN", "HR"),
   asyncHandler(async (req, res) => {
-    const {
-      internship_id,
-      intern_id,
-      mentor_id,
-      title,
-      description,
-      due_date,
-    } = req.body;
-    if (!internship_id || !intern_id || !mentor_id || !title)
-      return res
-        .status(400)
-        .json({
-          message: "internship_id, intern_id, mentor_id and title are required",
-        });
-    if (req.user.role === "MENTOR" && Number(mentor_id) !== req.user.user_id)
-      return res
-        .status(403)
-        .json({ message: "Mentors can only create their own tasks" });
+    const validationError = validateTaskFields(req.body, { creating: true });
+    if (validationError) return res.status(400).json({ message: validationError });
+
+    const internshipId = toPositiveInteger(req.body.internship_id);
+    const internId = toPositiveInteger(req.body.intern_id);
+    const mentorId = toPositiveInteger(req.body.mentor_id);
+    if (req.user.role === "MENTOR" && mentorId !== Number(req.user.user_id)) {
+      return res.status(403).json({ message: "Mentors can only create their own tasks" });
+    }
+
     const result = await pool.query(
       "INSERT INTO tasks (internship_id, intern_id, mentor_id, title, description, due_date) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
       [
-        internship_id,
-        intern_id,
-        mentor_id,
-        title.trim(),
-        description || null,
-        due_date || null,
+        internshipId,
+        internId,
+        mentorId,
+        req.body.title.trim(),
+        req.body.description || null,
+        req.body.due_date || null,
       ],
     );
-    res
-      .status(201)
-      .json({ message: "Task created successfully", task: result.rows[0] });
+    res.status(201).json({ message: "Task created successfully", task: result.rows[0] });
   }),
 );
 
@@ -103,9 +130,7 @@ router.get(
   "/",
   authorize("ADMIN", "HR"),
   asyncHandler(async (req, res) => {
-    const result = await pool.query(
-      "SELECT * FROM tasks ORDER BY task_id DESC",
-    );
+    const result = await pool.query("SELECT * FROM tasks ORDER BY task_id DESC");
     res.json({ tasks: result.rows });
   }),
 );
@@ -113,15 +138,14 @@ router.get(
 router.get(
   "/:taskId",
   asyncHandler(async (req, res) => {
-    const result = await pool.query("SELECT * FROM tasks WHERE task_id = $1", [
-      req.params.taskId,
-    ]);
+    const taskId = toPositiveInteger(req.params.taskId);
+    if (!taskId) return res.status(400).json({ message: "taskId must be a positive integer" });
+    const result = await pool.query("SELECT * FROM tasks WHERE task_id = $1", [taskId]);
     const task = result.rows[0];
     if (!task) return res.status(404).json({ message: "Task not found" });
-    if (!taskAccess(task, req.user))
-      return res
-        .status(403)
-        .json({ message: "You do not have access to this task" });
+    if (!taskAccess(task, req.user)) {
+      return res.status(403).json({ message: "You do not have access to this task" });
+    }
     res.json({ task });
   }),
 );
@@ -129,31 +153,34 @@ router.get(
 router.patch(
   "/:taskId",
   asyncHandler(async (req, res) => {
-    const existing = await pool.query(
-      "SELECT * FROM tasks WHERE task_id = $1",
-      [req.params.taskId],
-    );
+    const taskId = toPositiveInteger(req.params.taskId);
+    if (!taskId) return res.status(400).json({ message: "taskId must be a positive integer" });
+
+    const existing = await pool.query("SELECT * FROM tasks WHERE task_id = $1", [taskId]);
     const task = existing.rows[0];
     if (!task) return res.status(404).json({ message: "Task not found" });
-    if (!taskAccess(task, req.user))
-      return res
-        .status(403)
-        .json({ message: "You do not have access to this task" });
-    const fields = ["title", "description", "due_date", "status"];
-    const allowed =
-      isProgrammeManager(req.user.role) || task.mentor_id === req.user.user_id
-        ? fields
-        : ["status"];
-    const updates = allowed.filter((field) => Object.hasOwn(req.body, field));
-    if (!updates.length)
-      return res.status(400).json({ message: "No allowed fields supplied" });
+    if (!taskAccess(task, req.user)) {
+      return res.status(403).json({ message: "You do not have access to this task" });
+    }
+
+    const managerCanEdit = isProgrammeManager(req.user.role) || Number(task.mentor_id) === Number(req.user.user_id);
+    const allowedFields = managerCanEdit
+      ? ["title", "description", "due_date", "status"]
+      : ["status"];
+    const updates = allowedFields.filter((field) => hasOwn(req.body, field));
+    if (!updates.length) return res.status(400).json({ message: "No allowed fields supplied" });
+
+    const validationError = validateTaskFields(req.body);
+    if (validationError) return res.status(400).json({ message: validationError });
+    if (hasOwn(req.body, "title") && typeof req.body.title === "string") {
+      req.body.title = req.body.title.trim();
+    }
+
     const values = updates.map((field) => req.body[field]);
-    const setClause = updates
-      .map((field, index) => `${field} = $${index + 1}`)
-      .join(", ");
+    const setClause = updates.map((field, index) => field + " = $" + (index + 1)).join(", ");
     const result = await pool.query(
-      `UPDATE tasks SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE task_id = $${values.length + 1} RETURNING *`,
-      [...values, task.task_id],
+      "UPDATE tasks SET " + setClause + ", updated_at = CURRENT_TIMESTAMP WHERE task_id = $" + (values.length + 1) + " RETURNING *",
+      [...values, taskId],
     );
     res.json({ message: "Task updated successfully", task: result.rows[0] });
   }),
@@ -163,14 +190,13 @@ router.delete(
   "/:taskId",
   authorize("MENTOR", "ADMIN", "HR"),
   asyncHandler(async (req, res) => {
+    const taskId = toPositiveInteger(req.params.taskId);
+    if (!taskId) return res.status(400).json({ message: "taskId must be a positive integer" });
     const result = await pool.query(
       "DELETE FROM tasks WHERE task_id = $1 AND ($2::text IN ('ADMIN','HR') OR mentor_id = $3) RETURNING *",
-      [req.params.taskId, req.user.role, req.user.user_id],
+      [taskId, req.user.role, req.user.user_id],
     );
-    if (!result.rows[0])
-      return res
-        .status(404)
-        .json({ message: "Task not found or not permitted" });
+    if (!result.rows[0]) return res.status(404).json({ message: "Task not found or not permitted" });
     res.json({ message: "Task deleted successfully" });
   }),
 );
@@ -179,54 +205,51 @@ router.post(
   "/:taskId/updates",
   authorize("INTERN"),
   asyncHandler(async (req, res) => {
-    const { reflection, hours_worked, update_date } = req.body;
-    if (!reflection?.trim())
+    const taskId = toPositiveInteger(req.params.taskId);
+    if (!taskId) return res.status(400).json({ message: "taskId must be a positive integer" });
+
+    const { reflection, hours_worked: hoursWorked, update_date: updateDate } = req.body;
+    if (typeof reflection !== "string" || !reflection.trim()) {
       return res.status(400).json({ message: "reflection is required" });
-    const taskResult = await pool.query(
-      "SELECT * FROM tasks WHERE task_id = $1",
-      [req.params.taskId],
-    );
+    }
+    if (reflection.trim().length > 10000) {
+      return res.status(400).json({ message: "reflection must be 10000 characters or fewer" });
+    }
+    const parsedHours = hoursWorked === null || hoursWorked === undefined || hoursWorked === "" ? null : Number(hoursWorked);
+    if (parsedHours !== null && (!Number.isFinite(parsedHours) || parsedHours < 0 || parsedHours > 24)) {
+      return res.status(400).json({ message: "hours_worked must be between 0 and 24" });
+    }
+    if (!isIsoDate(updateDate)) return res.status(400).json({ message: "update_date must use YYYY-MM-DD format or be null" });
+
+    const taskResult = await pool.query("SELECT * FROM tasks WHERE task_id = $1", [taskId]);
     const task = taskResult.rows[0];
     if (!task) return res.status(404).json({ message: "Task not found" });
-    if (task.intern_id !== req.user.user_id)
-      return res
-        .status(403)
-        .json({ message: "You can only update your own tasks" });
+    if (Number(task.intern_id) !== Number(req.user.user_id)) {
+      return res.status(403).json({ message: "You can only update your own tasks" });
+    }
+
     const result = await pool.query(
       "INSERT INTO daily_updates (task_id, intern_id, reflection, hours_worked, update_date) VALUES ($1,$2,$3,$4,COALESCE($5,CURRENT_DATE)) RETURNING *",
-      [
-        task.task_id,
-        req.user.user_id,
-        reflection.trim(),
-        hours_worked ?? null,
-        update_date || null,
-      ],
+      [taskId, req.user.user_id, reflection.trim(), parsedHours, updateDate || null],
     );
-    res
-      .status(201)
-      .json({
-        message: "Daily update created successfully",
-        update: result.rows[0],
-      });
+    res.status(201).json({ message: "Daily update created successfully", update: result.rows[0] });
   }),
 );
 
 router.get(
   "/:taskId/updates",
   asyncHandler(async (req, res) => {
-    const taskResult = await pool.query(
-      "SELECT * FROM tasks WHERE task_id = $1",
-      [req.params.taskId],
-    );
+    const taskId = toPositiveInteger(req.params.taskId);
+    if (!taskId) return res.status(400).json({ message: "taskId must be a positive integer" });
+    const taskResult = await pool.query("SELECT * FROM tasks WHERE task_id = $1", [taskId]);
     const task = taskResult.rows[0];
     if (!task) return res.status(404).json({ message: "Task not found" });
-    if (!taskAccess(task, req.user))
-      return res
-        .status(403)
-        .json({ message: "You do not have access to these updates" });
+    if (!taskAccess(task, req.user)) {
+      return res.status(403).json({ message: "You do not have access to these updates" });
+    }
     const result = await pool.query(
       "SELECT * FROM daily_updates WHERE task_id = $1 ORDER BY update_date DESC, update_id DESC",
-      [task.task_id],
+      [taskId],
     );
     res.json({ updates: result.rows });
   }),
@@ -234,5 +257,8 @@ router.get(
 
 app.use("/api/tasks", router);
 app.use(errorHandler);
-const PORT = Number(process.env.PORT || 5003);
-app.listen(PORT, () => console.log(`Task Service running on port ${PORT}`));
+
+const server = app.listen(PORT, () => console.log("Task Service running on port " + PORT));
+const shutdown = () => server.close(() => pool.end(() => process.exit(0)));
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
