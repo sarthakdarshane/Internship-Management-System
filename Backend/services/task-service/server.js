@@ -12,6 +12,27 @@ const {
 const app = express();
 const pool = createPool();
 const PORT = Number(process.env.PORT || 5003);
+const SENTIMENT_SERVICE_URL = process.env.SENTIMENT_SERVICE_URL || "http://localhost:5004";
+
+async function requestSentimentAnalysis(req, update) {
+  const token = (req.headers.authorization || "").split(" ")[1];
+  try {
+    const response = await fetch(SENTIMENT_SERVICE_URL + "/api/sentiment/analyze", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify(update),
+    });
+    if (!response.ok) {
+      console.error("Sentiment service returned status " + response.status);
+      return { status: "failed" };
+    }
+    return { status: "analyzed", result: await response.json() };
+  } catch (error) {
+    console.error("Sentiment service unavailable:", error.message);
+    return { status: "pending" };
+  }
+}
+
 const VALID_STATUSES = new Set(["PENDING", "IN_PROGRESS", "COMPLETED"]);
 
 app.use(cors());
@@ -135,6 +156,86 @@ router.get(
   }),
 );
 
+
+router.post(
+  "/updates",
+  authorize("INTERN"),
+  asyncHandler(async (req, res) => {
+    const taskId = toPositiveInteger(req.body.task_id);
+    const { reflection, hours_worked: hoursWorked, update_date: updateDate } = req.body;
+    if (!taskId) return res.status(400).json({ message: "task_id must be a positive integer" });
+    if (typeof reflection !== "string" || !reflection.trim()) {
+      return res.status(400).json({ message: "reflection is required" });
+    }
+    if (reflection.trim().length > 10000) {
+      return res.status(400).json({ message: "reflection must be 10000 characters or fewer" });
+    }
+    const parsedHours = hoursWorked === null || hoursWorked === undefined || hoursWorked === "" ? null : Number(hoursWorked);
+    if (parsedHours !== null && (!Number.isFinite(parsedHours) || parsedHours < 0 || parsedHours > 24)) {
+      return res.status(400).json({ message: "hours_worked must be between 0 and 24" });
+    }
+    if (!isIsoDate(updateDate)) return res.status(400).json({ message: "update_date must use YYYY-MM-DD format or be null" });
+    const taskResult = await pool.query("SELECT * FROM tasks WHERE task_id = $1", [taskId]);
+    const task = taskResult.rows[0];
+    if (!task) return res.status(404).json({ message: "Task not found" });
+    if (Number(task.intern_id) !== Number(req.user.user_id)) {
+      return res.status(403).json({ message: "You can only update your own tasks" });
+    }
+    const result = await pool.query(
+      "INSERT INTO daily_updates (task_id, intern_id, reflection, hours_worked, update_date) VALUES ($1,$2,$3,$4,COALESCE($5,CURRENT_DATE)) RETURNING *",
+      [taskId, req.user.user_id, reflection.trim(), parsedHours, updateDate || null],
+    );
+    const sentiment = await requestSentimentAnalysis(req, {
+      update_id: result.rows[0].update_id,
+      intern_id: req.user.user_id,
+      text: reflection.trim(),
+      text_content: reflection.trim(),
+    });
+    res.status(201).json({ message: "Daily update created successfully", update: result.rows[0], sentiment });
+  }),
+);
+
+router.get(
+  "/updates",
+  authorize("INTERN", "MENTOR", "ADMIN", "HR"),
+  asyncHandler(async (req, res) => {
+    const values = [];
+    let filter = "";
+    if (req.user.role === "INTERN") {
+      values.push(req.user.user_id);
+      filter = " WHERE du.intern_id = $1";
+    } else if (req.user.role === "MENTOR") {
+      values.push(req.user.user_id);
+      filter = " WHERE t.mentor_id = $1";
+    }
+    const result = await pool.query(
+      "SELECT du.*, t.title, t.internship_id, t.mentor_id FROM daily_updates du JOIN tasks t ON t.task_id = du.task_id" + filter + " ORDER BY du.update_date DESC, du.update_id DESC",
+      values,
+    );
+    res.json({ updates: result.rows });
+  }),
+);
+
+router.get(
+  "/updates/:updateId",
+  authorize("INTERN", "MENTOR", "ADMIN", "HR"),
+  asyncHandler(async (req, res) => {
+    const updateId = toPositiveInteger(req.params.updateId);
+    if (!updateId) return res.status(400).json({ message: "update id must be a positive integer" });
+    const result = await pool.query(
+      "SELECT du.*, t.title, t.internship_id, t.mentor_id FROM daily_updates du JOIN tasks t ON t.task_id = du.task_id WHERE du.update_id = $1",
+      [updateId],
+    );
+    const update = result.rows[0];
+    if (!update) return res.status(404).json({ message: "Daily update not found" });
+    const allowed = ["ADMIN", "HR"].includes(req.user.role) ||
+      Number(update.intern_id) === Number(req.user.user_id) ||
+      Number(update.mentor_id) === Number(req.user.user_id);
+    if (!allowed) return res.status(403).json({ message: "You do not have access to this update" });
+    res.json({ update });
+  }),
+);
+
 router.get(
   "/:taskId",
   asyncHandler(async (req, res) => {
@@ -232,7 +333,17 @@ router.post(
       "INSERT INTO daily_updates (task_id, intern_id, reflection, hours_worked, update_date) VALUES ($1,$2,$3,$4,COALESCE($5,CURRENT_DATE)) RETURNING *",
       [taskId, req.user.user_id, reflection.trim(), parsedHours, updateDate || null],
     );
-    res.status(201).json({ message: "Daily update created successfully", update: result.rows[0] });
+    const sentiment = await requestSentimentAnalysis(req, {
+      update_id: result.rows[0].update_id,
+      intern_id: req.user.user_id,
+      text: reflection.trim(),
+      text_content: reflection.trim(),
+    });
+    res.status(201).json({
+      message: "Daily update created successfully",
+      update: result.rows[0],
+      sentiment,
+    });
   }),
 );
 
