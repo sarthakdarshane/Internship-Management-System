@@ -240,6 +240,61 @@ router.get(
   }),
 );
 
+
+router.get(
+  "/assigned",
+  authorize("MENTOR"),
+  asyncHandler(async (req, res) => {
+    const token = (req.headers.authorization || "").split(" ")[1];
+    const internshipPayload = await serviceGet(serviceUrls.internship + "/api/internships/assigned", token);
+    const internshipIds = records(internshipPayload, "internships")
+      .map((item) => Number(item.internship_id))
+      .filter(isPositiveInteger);
+    if (!internshipIds.length) return res.json({ reports: [] });
+    const result = await pool.query(
+      "SELECT * FROM monthly_reports WHERE internship_id = ANY($1::int[]) ORDER BY month DESC, report_id DESC",
+      [internshipIds],
+    );
+    res.json({ reports: result.rows });
+  }),
+);
+
+router.get(
+  "/intern/:internId/month/:month/year/:year",
+  authorize("INTERN", "MENTOR", "ADMIN", "HR"),
+  asyncHandler(async (req, res) => {
+    const internId = Number(req.params.internId);
+    const month = Number(req.params.month);
+    const year = Number(req.params.year);
+    if (
+      !isPositiveInteger(internId) ||
+      !Number.isInteger(month) || month < 1 || month > 12 ||
+      !Number.isInteger(year) || year < 2000 || year > 9999
+    ) {
+      return res.status(400).json({ message: "internId, month and year are invalid" });
+    }
+    if (req.user.role === "INTERN" && internId !== Number(req.user.user_id)) {
+      return res.status(403).json({ message: "You can only view your own reports" });
+    }
+    let query = "SELECT * FROM monthly_reports WHERE intern_id = $1 AND EXTRACT(MONTH FROM month) = $2 AND EXTRACT(YEAR FROM month) = $3";
+    const values = [internId, month, year];
+    if (req.user.role === "MENTOR") {
+      const token = (req.headers.authorization || "").split(" ")[1];
+      const internshipPayload = await serviceGet(serviceUrls.internship + "/api/internships/assigned", token);
+      const internshipIds = records(internshipPayload, "internships")
+        .map((item) => Number(item.internship_id))
+        .filter(isPositiveInteger);
+      if (!internshipIds.length) return res.status(404).json({ message: "Report not found" });
+      query += " AND internship_id = ANY($4::int[])";
+      values.push(internshipIds);
+    }
+    query += " ORDER BY report_id DESC";
+    const result = await pool.query(query, values);
+    if (!result.rows.length) return res.status(404).json({ message: "Report not found" });
+    res.json({ report: result.rows[0], reports: result.rows });
+  }),
+);
+
 router.get(
   "/",
   authorize("ADMIN", "HR"),
