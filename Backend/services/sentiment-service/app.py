@@ -1,7 +1,7 @@
 """Python sentiment API for the Internship Management System.
 
-It keeps the existing /api/sentiment contract, verifies auth-service JWTs,
-analyses intern reflections with VADER, and stores results in sentiment_db.
+It verifies auth-service JWTs, analyses intern reflections with VADER, and
+stores results in the sentiment PostgreSQL database.
 """
 
 from __future__ import annotations
@@ -16,18 +16,19 @@ import jwt
 import psycopg
 from flask import Flask, g, jsonify, request
 from jwt import InvalidTokenError
+from psycopg.rows import dict_row
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-
 BASE_DIR = Path(__file__).resolve().parent
+MAX_TEXT_LENGTH = 5000
+VALID_LABELS = {"POSITIVE", "NEUTRAL", "NEGATIVE"}
 
 
 def load_env_file() -> None:
-    """Read a local .env without requiring a separate Python package."""
+    """Load local .env values without overriding real environment variables."""
     env_file = BASE_DIR / ".env"
     if not env_file.exists():
         return
-
     for raw_line in env_file.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -37,32 +38,15 @@ def load_env_file() -> None:
 
 
 load_env_file()
-
 app = Flask(__name__)
 analyser = SentimentIntensityAnalyzer()
-
-def ensure_schema() -> None:
-    with database_connection() as connection, connection.cursor() as cursor:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS sentiment_analysis (
-                sentiment_id SERIAL PRIMARY KEY,
-                update_id INTEGER NOT NULL UNIQUE,
-                intern_id INTEGER NOT NULL,
-                text_content TEXT NOT NULL,
-                sentiment VARCHAR(12) NOT NULL CHECK (sentiment IN ('POSITIVE', 'NEUTRAL', 'NEGATIVE')),
-                score NUMERIC(4,3) NOT NULL CHECK (score >= 0 AND score <= 1),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        connection.commit()
 
 
 def database_config() -> dict[str, Any]:
     required = ("DB_USER", "DB_HOST", "DB_NAME", "DB_PASSWORD")
     missing = [key for key in required if not os.getenv(key)]
     if missing:
-        raise RuntimeError(f"Missing required database configuration: {', '.join(missing)}")
-
+        raise RuntimeError("Missing required database configuration: " + ", ".join(missing))
     return {
         "user": os.environ["DB_USER"],
         "host": os.environ["DB_HOST"],
@@ -78,24 +62,39 @@ def database_connection():
         yield connection
 
 
+def ensure_schema() -> None:
+    """Create the table when the service is started against a fresh database."""
+    with database_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sentiment_analysis (
+                sentiment_id SERIAL PRIMARY KEY,
+                update_id INTEGER NOT NULL UNIQUE,
+                intern_id INTEGER NOT NULL,
+                text_content TEXT NOT NULL,
+                sentiment VARCHAR(12) NOT NULL CHECK (sentiment IN ('POSITIVE', 'NEUTRAL', 'NEGATIVE')),
+                score NUMERIC(4,3) NOT NULL CHECK (score >= 0 AND score <= 1),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+
+
 def authenticate(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         scheme, _, token = request.headers.get("Authorization", "").partition(" ")
         if scheme != "Bearer" or not token:
             return jsonify(message="A Bearer token is required"), 401
-
         secret = os.getenv("JWT_SECRET")
         if not secret:
             return jsonify(message="Server JWT configuration is missing"), 500
-
         try:
             g.user = jwt.decode(token, secret, algorithms=["HS256"])
         except InvalidTokenError:
             return jsonify(message="Invalid or expired token"), 401
-
         return view(*args, **kwargs)
-
     return wrapped
 
 
@@ -106,14 +105,12 @@ def roles_required(*roles: str):
             if g.user.get("role") not in roles:
                 return jsonify(message="You do not have permission to perform this action"), 403
             return view(*args, **kwargs)
-
         return wrapped
-
     return decorator
 
 
 def classify_sentiment(text: str) -> tuple[str, float]:
-    """Return the label and a 0..1 score from VADER's compound score."""
+    """Return a label and normalized 0..1 VADER compound score."""
     compound = analyser.polarity_scores(text)["compound"]
     score = round((compound + 1) / 2, 3)
     if score >= 0.6:
@@ -124,9 +121,11 @@ def classify_sentiment(text: str) -> tuple[str, float]:
 
 
 def analysis_to_json(row: dict[str, Any]) -> dict[str, Any]:
-    row["score"] = float(row["score"])
-    row["created_at"] = row["created_at"].isoformat()
-    return row
+    result = dict(row)
+    result["score"] = float(result["score"])
+    if result.get("created_at") is not None:
+        result["created_at"] = result["created_at"].isoformat()
+    return result
 
 
 @app.after_request
@@ -146,7 +145,7 @@ def handle_preflight_request():
 
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify(message="Python Sentiment Service API is running", engine="VADER")
+    return jsonify(service="sentiment-service", message="Python Sentiment Service API is running", engine="VADER")
 
 
 @app.route("/health", methods=["GET"])
@@ -156,10 +155,10 @@ def health():
         with database_connection() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT 1")
             cursor.fetchone()
-    except (psycopg.Error, RuntimeError) as error:
+    except (psycopg.Error, RuntimeError, ValueError) as error:
         app.logger.error("Sentiment health check failed: %s", error)
-        return jsonify(message="Database connection failed"), 500
-    return jsonify(status="ok", engine="VADER")
+        return jsonify(status="error", message="Database connection failed"), 503
+    return jsonify(status="ok", service="sentiment-service", engine="VADER")
 
 
 @app.route("/api/sentiment/analyze", methods=["POST", "OPTIONS"])
@@ -169,12 +168,16 @@ def analyze():
     payload = request.get_json(silent=True) or {}
     update_id = payload.get("update_id")
     text = payload.get("text_content")
+    if type(update_id) is not int or update_id <= 0:
+        return jsonify(message="update_id must be a positive integer"), 400
+    if not isinstance(text, str) or not text.strip():
+        return jsonify(message="text_content must be non-empty text"), 400
+    cleaned_text = text.strip()
+    if len(cleaned_text) > MAX_TEXT_LENGTH:
+        return jsonify(message="text_content must be 5000 characters or fewer"), 400
 
-    if not isinstance(update_id, int) or not isinstance(text, str) or not text.strip():
-        return jsonify(message="update_id (integer) and text_content (non-empty text) are required"), 400
-
-    sentiment, score = classify_sentiment(text.strip())
-    with database_connection() as connection, connection.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+    sentiment, score = classify_sentiment(cleaned_text)
+    with database_connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
             """
             INSERT INTO sentiment_analysis (update_id, intern_id, text_content, sentiment, score)
@@ -187,11 +190,10 @@ def analyze():
                 created_at = CURRENT_TIMESTAMP
             RETURNING sentiment_id, update_id, intern_id, text_content, sentiment, score, created_at
             """,
-            (update_id, g.user["user_id"], text.strip(), sentiment, score),
+            (update_id, g.user["user_id"], cleaned_text, sentiment, score),
         )
         result = cursor.fetchone()
         connection.commit()
-
     return jsonify(message="Sentiment analysed successfully", analysis=analysis_to_json(result)), 201
 
 
@@ -199,10 +201,10 @@ def analyze():
 @authenticate
 @roles_required("INTERN")
 def mine():
-    with database_connection() as connection, connection.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+    with database_connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
             """SELECT sentiment_id, update_id, intern_id, text_content, sentiment, score, created_at
-                 FROM sentiment_analysis WHERE intern_id = %s ORDER BY created_at DESC""",
+               FROM sentiment_analysis WHERE intern_id = %s ORDER BY created_at DESC""",
             (g.user["user_id"],),
         )
         rows = cursor.fetchall()
@@ -213,10 +215,10 @@ def mine():
 @authenticate
 @roles_required("ADMIN", "HR")
 def all_analyses():
-    with database_connection() as connection, connection.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+    with database_connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
             """SELECT sentiment_id, update_id, intern_id, text_content, sentiment, score, created_at
-                 FROM sentiment_analysis ORDER BY created_at DESC"""
+               FROM sentiment_analysis ORDER BY created_at DESC"""
         )
         rows = cursor.fetchall()
     return jsonify(analyses=[analysis_to_json(row) for row in rows])
@@ -225,14 +227,13 @@ def all_analyses():
 @app.route("/api/sentiment/<int:sentiment_id>", methods=["GET", "OPTIONS"])
 @authenticate
 def get_analysis(sentiment_id: int):
-    with database_connection() as connection, connection.cursor(row_factory=psycopg.rows.dict_row) as cursor:
+    with database_connection() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
             """SELECT sentiment_id, update_id, intern_id, text_content, sentiment, score, created_at
-                 FROM sentiment_analysis WHERE sentiment_id = %s""",
+               FROM sentiment_analysis WHERE sentiment_id = %s""",
             (sentiment_id,),
         )
         result = cursor.fetchone()
-
     if not result:
         return jsonify(message="Sentiment analysis not found"), 404
     if g.user.get("role") not in {"ADMIN", "HR"} and result["intern_id"] != g.user.get("user_id"):
