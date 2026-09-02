@@ -21,5 +21,5 @@ export const getInternships = (role) => role === "INTERN" ? internshipApi.get("/
 export const getTasks = (role) => role === "INTERN" ? taskApi.get("/tasks/mine") : role === "MENTOR" ? taskApi.get("/tasks/assigned") : taskApi.get("/tasks");
 export const getSentiments = (role) => role === "INTERN" ? sentimentApi.get("/sentiment/mine") : sentimentApi.get("/sentiment");
 export const getEvaluations = (role) => role === "INTERN" ? evaluationApi.get("/evaluations/mine") : role === "MENTOR" ? evaluationApi.get("/evaluations/assigned") : evaluationApi.get("/evaluations");
-export const getReports = (role) => role === "INTERN" ? reportApi.get("/reports/mine") : reportApi.get("/reports");
+export const getReports = (role) => role === "INTERN" ? reportApi.get("/reports/mine") : role === "MENTOR" ? reportApi.get("/reports/assigned") : reportApi.get("/reports");
 export default api;
