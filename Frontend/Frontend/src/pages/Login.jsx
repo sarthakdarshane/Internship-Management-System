@@ -1,6 +1,6 @@
 import { useContext, useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
-import { AuthContext } from "../context/AuthContext";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { AuthContext } from "../context/auth-context";
 import { getProfile, login } from "../services/api";
 
 export default function Login() {
@@ -10,6 +10,8 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false);
   const { user, saveUser } = useContext(AuthContext);
   const navigate = useNavigate();
+  const location = useLocation();
+  const justRegistered = Boolean(location.state?.registered);
   if (user) return <Navigate to="/dashboard" replace />;
   async function handleSubmit(event) {
     event.preventDefault();
@@ -55,6 +57,11 @@ export default function Login() {
             Use your registered account details to continue.
           </p>
         </div>
+        {justRegistered && (
+          <p className="form-success" role="status">
+            Account created. Sign in to continue.
+          </p>
+        )}
         <form onSubmit={handleSubmit}>
           <label>
             Email address

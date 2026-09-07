@@ -22,6 +22,9 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 BASE_DIR = Path(__file__).resolve().parent
 MAX_TEXT_LENGTH = 5000
 VALID_LABELS = {"POSITIVE", "NEUTRAL", "NEGATIVE"}
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
+)
 
 
 def load_env_file() -> None:
@@ -130,7 +133,15 @@ def analysis_to_json(row: dict[str, Any]) -> dict[str, Any]:
 
 @app.after_request
 def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = os.getenv("CORS_ORIGIN", "http://localhost:5173")
+    origins = {
+        origin.strip()
+        for origin in os.getenv("CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+        if origin.strip()
+    }
+    request_origin = request.headers.get("Origin")
+    if request_origin and request_origin in origins:
+        response.headers["Access-Control-Allow-Origin"] = request_origin
+        response.headers["Vary"] = "Origin"
     response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response

@@ -2,117 +2,107 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { register } from "../services/api";
 
-function Register() {
-    const navigate = useNavigate();
-    const [formData, setFormData] = useState({
-        full_name: "",
-        email: "",
-        password: "",
-        role: "INTERN"
-    });
+export default function Register() {
+  const navigate = useNavigate();
+  const [formData, setFormData] = useState({
+    full_name: "",
+    email: "",
+    password: "",
+    role: "INTERN",
+  });
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-    const handleChange = (e) => {
-        setFormData({
-            ...formData,
-            [e.target.name]: e.target.value
-        });
-    };
+  const handleChange = (e) =>
+    setFormData((f) => ({ ...f, [e.target.name]: e.target.value }));
 
-    const handleRegister = async (e) => {
-        e.preventDefault();
+  async function handleRegister(e) {
+    e.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      await register(formData);
+      navigate("/login", { state: { registered: true } });
+    } catch (err) {
+      setError(err.response?.data?.message || "Registration failed.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
-        try {
-            await register(formData);
+  return (
+    <div className="auth-page">
+      <section className="auth-intro">
+        <span className="intro-logo">IM</span>
+        <p className="eyebrow">INTERNSHIP MANAGEMENT</p>
+        <h1>Start your growth journey.</h1>
+        <p>
+          Create an account to track tasks, submit updates, and receive
+          structured feedback from your mentor.
+        </p>
+      </section>
 
-            alert("Registration successful. Please sign in.");
-
-            setFormData({
-                full_name: "",
-                email: "",
-                password: "",
-                role: "INTERN"
-            });
-            navigate("/login");
-
-        } catch (error) {
-            console.error(error);
-
-            alert(
-                error.response?.data?.message ||
-                "Registration failed"
-            );
-        }
-    };
-
-    return (
-        <div className="login-container">
-
-            <div className="login-card">
-
-                <h1>Create Account</h1>
-
-                <p>Register for your internship</p>
-
-                <form onSubmit={handleRegister}>
-
-                    <label>Full Name</label>
-
-                    <input
-                        type="text"
-                        name="full_name"
-                        placeholder="Enter full name"
-                        value={formData.full_name}
-                        onChange={handleChange}
-                        required
-                    />
-
-                    <label>Email</label>
-
-                    <input
-                        type="email"
-                        name="email"
-                        placeholder="Enter email"
-                        value={formData.email}
-                        onChange={handleChange}
-                        required
-                    />
-
-                    <label>Password</label>
-
-                    <input
-                        type="password"
-                        name="password"
-                        placeholder="Enter password"
-                        value={formData.password}
-                        onChange={handleChange}
-                        required
-                    />
-
-                    <label>Role</label>
-
-                    <select
-                        name="role"
-                        value={formData.role}
-                        onChange={handleChange}
-                    >
-                        <option value="INTERN">Intern</option>
-                        <option value="MENTOR">Mentor</option>
-                        <option value="ADMIN">Admin</option>
-                        <option value="HR">HR</option>
-                    </select>
-
-                    <button type="submit">
-                        Register
-                    </button>
-
-                </form>
-
-                <p className="auth-switch">Already have an account? <Link to="/login">Sign in</Link></p>
-
-            </div>
-
+      <main className="auth-card">
+        <div>
+          <p className="eyebrow">GET STARTED</p>
+          <h2>Create your account</h2>
+          <p className="muted">
+            New accounts start as interns. An admin can change your role later.
+          </p>
         </div>
-    );
-}
 
-export default Register;
+        <form onSubmit={handleRegister}>
+          <label>
+            Full name
+            <input
+              type="text"
+              name="full_name"
+              value={formData.full_name}
+              onChange={handleChange}
+              placeholder="Jane Doe"
+              autoComplete="name"
+              required
+            />
+          </label>
+          <label>
+            Email address
+            <input
+              type="email"
+              name="email"
+              value={formData.email}
+              onChange={handleChange}
+              placeholder="you@example.com"
+              autoComplete="email"
+              required
+            />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              name="password"
+              value={formData.password}
+              onChange={handleChange}
+              placeholder="At least 8 characters"
+              autoComplete="new-password"
+              minLength={8}
+              required
+            />
+          </label>
+          {error && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
+          <button className="primary-button" disabled={submitting}>
+            {submitting ? "Creating account…" : "Create account"}
+          </button>
+        </form>
+
+        <p className="auth-switch">
+          Already have an account? <Link to="/login">Sign in</Link>
+        </p>
+      </main>
+    </div>
+  );
+}

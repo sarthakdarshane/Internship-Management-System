@@ -1,14 +1,8 @@
-import {
-  createContext,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getProfile } from "../services/api";
+import { AuthContext } from "./auth-context";
 
-export const AuthContext = createContext(null);
-const storedUser = () => {
+const readStoredUser = () => {
   try {
     return JSON.parse(localStorage.getItem("user"));
   } catch {
@@ -17,32 +11,48 @@ const storedUser = () => {
 };
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(storedUser);
+  const [user, setUser] = useState(readStoredUser);
+  // Resolve the profile only when a token exists but no cached user is present.
   const [loading, setLoading] = useState(
-    Boolean(localStorage.getItem("token")) && !storedUser(),
+    () => Boolean(localStorage.getItem("token")) && !readStoredUser(),
   );
+
   const saveUser = useCallback((profile) => {
     localStorage.setItem("user", JSON.stringify(profile));
     setUser(profile);
   }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     setUser(null);
   }, []);
+
   useEffect(() => {
-    if (!localStorage.getItem("token") || user) {
-      setLoading(false);
-      return;
-    }
+    // Nothing to resolve if we already have a cached user or no token.
+    if (user || !localStorage.getItem("token")) return;
+
+    let active = true;
     getProfile()
-      .then(({ data }) => saveUser(data.user ?? data))
-      .catch(logout)
-      .finally(() => setLoading(false));
+      .then(({ data }) => {
+        if (active) saveUser(data.user ?? data);
+      })
+      .catch(() => {
+        if (active) logout();
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
   }, [logout, saveUser, user]);
+
   const value = useMemo(
     () => ({ user, loading, saveUser, logout }),
     [user, loading, saveUser, logout],
   );
+
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
