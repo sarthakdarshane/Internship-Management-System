@@ -1,4 +1,4 @@
-# 🤖 AI-Based Internship Management and Performance Evaluation System
+# 🤖 InternTracker -  Interns Management and Performance Evaluation System
 
 > A microservices-based web application for managing internships, tasks, daily work updates, mentor evaluations, sentiment analysis, and performance reports.
 
