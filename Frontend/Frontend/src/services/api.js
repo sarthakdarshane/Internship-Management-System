@@ -1,11 +1,14 @@
 import axios from "axios";
 
-const AUTH = "http://localhost:5001/api";
-const INTERNSHIP = "http://localhost:5002/api";
-const TASK = "http://localhost:5003/api";
-const SENTIMENT = "http://localhost:5004/api";
-const EVALUATION = "http://localhost:5005/api";
-const REPORT = "http://localhost:5006/api";
+// All services are reached through the Vite dev-server proxy (see vite.config.js),
+// so we use relative paths. This keeps requests same-origin and avoids CORS
+// errors no matter which port the frontend happens to run on.
+const AUTH = "/api";
+const INTERNSHIP = "/api";
+const TASK = "/api";
+const SENTIMENT = "/api";
+const EVALUATION = "/api";
+const REPORT = "/api";
 
 const getToken = () => localStorage.getItem("token");
 
